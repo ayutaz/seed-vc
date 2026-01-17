@@ -10,6 +10,7 @@ from hf_utils import load_custom_model_from_hf
 import numpy as np
 from pydub import AudioSegment
 import argparse
+from scipy.ndimage import median_filter
 # Load model and configuration
 
 fp16 = False
@@ -217,11 +218,56 @@ def adjust_f0_semitones(f0_sequence, n_semitones):
     factor = 2 ** (n_semitones / 12)
     return f0_sequence * factor
 
+def postprocess_f0(f0, filter_size=3):
+    """
+    F0の後処理: メディアンフィルタでノイズを除去
+
+    Args:
+        f0: F0配列 (numpy array)
+        filter_size: メディアンフィルタのサイズ（奇数）
+
+    Returns:
+        処理後のF0配列
+    """
+    if filter_size <= 1:
+        return f0
+
+    # 有声区間のマスクを保存
+    voiced_mask = f0 > 1
+
+    # メディアンフィルタを適用（有声区間のみ）
+    if np.any(voiced_mask):
+        f0_filtered = f0.copy()
+        # メディアンフィルタを全体に適用
+        f0_filtered = median_filter(f0_filtered, size=filter_size, mode='nearest')
+        # 無声区間は0に戻す
+        f0_filtered[~voiced_mask] = 0
+        return f0_filtered
+
+    return f0
+
 def crossfade(chunk1, chunk2, overlap):
     fade_out = np.cos(np.linspace(0, np.pi / 2, overlap)) ** 2
     fade_in = np.cos(np.linspace(np.pi / 2, 0, overlap)) ** 2
     chunk2[:overlap] = chunk2[:overlap] * fade_in + chunk1[-overlap:] * fade_out
     return chunk2
+
+def normalize_audio(audio, target_peak=0.95):
+    """
+    音声を正規化してクリッピングを防止
+
+    Args:
+        audio: 音声配列 (numpy array)
+        target_peak: 目標ピーク値（0〜1、デフォルト: 0.95）
+
+    Returns:
+        正規化された音声配列
+    """
+    max_val = np.max(np.abs(audio))
+    if max_val > 0:
+        # ピーク値をtarget_peakに正規化
+        return audio * (target_peak / max_val)
+    return audio
 
 # streaming and chunk processing related params
 # max_context_window = sr // hop_length * 30
@@ -239,7 +285,7 @@ overlap_frame_len = 16
 
 @torch.no_grad()
 @torch.inference_mode()
-def voice_conversion(source, target, diffusion_steps, length_adjust, inference_cfg_rate, auto_f0_adjust, pitch_shift):
+def voice_conversion(source, target, diffusion_steps, length_adjust, inference_cfg_rate, auto_f0_adjust, pitch_shift, f0_threshold, f0_median_filter):
     inference_module = model_f0
     mel_fn = to_mel_f0
     # Load audio
@@ -291,8 +337,13 @@ def voice_conversion(source, target, diffusion_steps, length_adjust, inference_c
     feat2 = feat2 - feat2.mean(dim=0, keepdim=True)
     style2 = campplus_model(feat2.unsqueeze(0))
 
-    F0_ori = f0_fn(ref_waves_16k[0], thred=0.03)
-    F0_alt = f0_fn(converted_waves_16k[0], thred=0.03)
+    F0_ori = f0_fn(ref_waves_16k[0], thred=f0_threshold)
+    F0_alt = f0_fn(converted_waves_16k[0], thred=f0_threshold)
+
+    # F0の後処理（メディアンフィルタ）
+    if f0_median_filter > 1:
+        F0_ori = postprocess_f0(F0_ori, filter_size=f0_median_filter)
+        F0_alt = postprocess_f0(F0_alt, filter_size=f0_median_filter)
 
     if device.type == "mps":
         F0_ori = torch.from_numpy(F0_ori).float().to(device)[None]
@@ -321,8 +372,13 @@ def voice_conversion(source, target, diffusion_steps, length_adjust, inference_c
     # Length regulation
     cond, _, codes, commitment_loss, codebook_loss = inference_module.length_regulator(S_alt, ylens=target_lengths, n_quantizers=3, f0=shifted_f0_alt)
     prompt_condition, _, codes, commitment_loss, codebook_loss = inference_module.length_regulator(S_ori, ylens=target2_lengths, n_quantizers=3, f0=F0_ori)
-    interpolated_shifted_f0_alt = torch.nn.functional.interpolate(shifted_f0_alt.unsqueeze(1), size=cond.size(1),
-                                                                  mode='nearest').squeeze(1)
+    # F0を線形補間（nearestよりも滑らかでノイズが減少）
+    interpolated_shifted_f0_alt = torch.nn.functional.interpolate(
+        shifted_f0_alt.unsqueeze(1).float(),
+        size=cond.size(1),
+        mode='linear',
+        align_corners=False
+    ).squeeze(1)
     max_source_window = max_context_window - mel2.size(2)
     # split source condition (cond) into chunks
     processed_frames = 0
@@ -352,7 +408,9 @@ def voice_conversion(source, target, diffusion_steps, length_adjust, inference_c
                     output_wave.tobytes(), frame_rate=sr,
                     sample_width=output_wave.dtype.itemsize, channels=1
                 ).export(format="mp3", bitrate=bitrate).read()
-                yield mp3_bytes, (sr, np.concatenate(generated_wave_chunks))
+                final_wave = np.concatenate(generated_wave_chunks)
+                final_wave = normalize_audio(final_wave)
+                yield mp3_bytes, (sr, final_wave)
                 break
             output_wave = vc_wave[0, :-overlap_wave_len].cpu().numpy()
             generated_wave_chunks.append(output_wave)
@@ -373,7 +431,9 @@ def voice_conversion(source, target, diffusion_steps, length_adjust, inference_c
                 output_wave.tobytes(), frame_rate=sr,
                 sample_width=output_wave.dtype.itemsize, channels=1
             ).export(format="mp3", bitrate=bitrate).read()
-            yield mp3_bytes, (sr, np.concatenate(generated_wave_chunks))
+            final_wave = np.concatenate(generated_wave_chunks)
+            final_wave = normalize_audio(final_wave)
+            yield mp3_bytes, (sr, final_wave)
             break
         else:
             output_wave = crossfade(previous_chunk.cpu().numpy(), vc_wave[0, :-overlap_wave_len].cpu().numpy(), overlap_wave_len)
@@ -395,38 +455,41 @@ def main(args):
     # streaming and chunk processing related params
     max_context_window = sr // hop_length * 30
     overlap_wave_len = overlap_frame_len * hop_length
-    description = ("Zero-shot voice conversion with in-context learning. For local deployment please check [GitHub repository](https://github.com/Plachtaa/seed-vc) "
-                   "for details and updates.<br>Note that any reference audio will be forcefully clipped to 25s if beyond this length.<br> "
-                   "If total duration of source and reference audio exceeds 30s, source audio will be processed in chunks.<br> "
-                   "无需训练的 zero-shot 语音/歌声转换模型，若需本地部署查看[GitHub页面](https://github.com/Plachtaa/seed-vc)<br>"
-                   "请注意，参考音频若超过 25 秒，则会被自动裁剪至此长度。<br>若源音频和参考音频的总时长超过 30 秒，源音频将被分段处理。")
+    description = ("ゼロショット歌声変換（Singing Voice Conversion）システムです。<br>"
+                   "訓練なしで、1〜25秒の参照音声のみで音声のクローンと変換が可能です。<br><br>"
+                   "<b>注意事項:</b><br>"
+                   "・参照音声が25秒を超える場合、自動的に25秒にカットされます<br>"
+                   "・ソース音声と参照音声の合計が30秒を超える場合、ソース音声は分割処理されます<br><br>"
+                   "詳細は <a href='https://github.com/Plachtaa/seed-vc'>GitHub</a> をご覧ください。")
     inputs = [
-        gr.Audio(type="filepath", label="Source Audio / 源音频"),
-        gr.Audio(type="filepath", label="Reference Audio / 参考音频"),
-        gr.Slider(minimum=1, maximum=200, value=10, step=1, label="Diffusion Steps / 扩散步数", info="10 by default, 50~100 for best quality / 默认为 10，50~100 为最佳质量"),
-        gr.Slider(minimum=0.5, maximum=2.0, step=0.1, value=1.0, label="Length Adjust / 长度调整", info="<1.0 for speed-up speech, >1.0 for slow-down speech / <1.0 加速语速，>1.0 减慢语速"),
-        gr.Slider(minimum=0.0, maximum=1.0, step=0.1, value=0.7, label="Inference CFG Rate", info="has subtle influence / 有微小影响"),
-        gr.Checkbox(label="Auto F0 adjust / 自动F0调整", value=True,
-                    info="Roughly adjust F0 to match target voice. Only works when F0 conditioned model is used. / 粗略调整 F0 以匹配目标音色，仅在勾选 '启用F0输入' 时生效"),
-        gr.Slider(label='Pitch shift / 音调变换', minimum=-24, maximum=24, step=1, value=0, info="Pitch shift in semitones, only works when F0 conditioned model is used / 半音数的音高变换，仅在勾选 '启用F0输入' 时生效"),
+        gr.Audio(type="filepath", label="ソース音声（変換元）"),
+        gr.Audio(type="filepath", label="参照音声（変換先の声質）"),
+        gr.Slider(minimum=1, maximum=200, value=50, step=1, label="拡散ステップ数", info="高品質: 50〜100、高速: 10〜25"),
+        gr.Slider(minimum=0.5, maximum=2.0, step=0.1, value=1.0, label="長さ調整", info="1.0未満: 速度アップ、1.0超: 速度ダウン"),
+        gr.Slider(minimum=0.0, maximum=1.0, step=0.1, value=0.7, label="CFGレート", info="微細な影響があります"),
+        gr.Checkbox(label="自動F0調整", value=True,
+                    info="ソースのF0（基本周波数）を参照音声に合わせて自動調整します"),
+        gr.Slider(label='ピッチシフト（半音）', minimum=-24, maximum=24, step=1, value=0, info="半音単位でピッチを上下させます（例: -12で1オクターブ下げ）"),
+        gr.Slider(label='F0閾値', minimum=0.01, maximum=0.2, step=0.01, value=0.05, info="F0検出の閾値（高いほど無声区間が増える、推奨: 0.03〜0.1）"),
+        gr.Slider(label='F0メディアンフィルタ', minimum=1, maximum=9, step=2, value=3, info="F0のノイズ除去フィルタサイズ（奇数、1=無効、推奨: 3〜5）"),
     ]
 
-    examples = [["examples/source/yae_0.wav", "examples/reference/dingzhen_0.wav", 25, 1.0, 0.7, True, 0],
-                ["examples/source/jay_0.wav", "examples/reference/azuma_0.wav", 25, 1.0, 0.7, True, 0],
+    examples = [["examples/source/yae_0.wav", "examples/reference/dingzhen_0.wav", 25, 1.0, 0.7, True, 0, 0.05, 3],
+                ["examples/source/jay_0.wav", "examples/reference/azuma_0.wav", 25, 1.0, 0.7, True, 0, 0.05, 3],
                 ["examples/source/Wiz Khalifa,Charlie Puth - See You Again [vocals]_[cut_28sec].wav",
-                 "examples/reference/teio_0.wav", 50, 1.0, 0.7, False, 0],
+                 "examples/reference/teio_0.wav", 50, 1.0, 0.7, False, 0, 0.05, 3],
                 ["examples/source/TECHNOPOLIS - 2085 [vocals]_[cut_14sec].wav",
-                 "examples/reference/trump_0.wav", 50, 1.0, 0.7, False, -12],
+                 "examples/reference/trump_0.wav", 50, 1.0, 0.7, False, -12, 0.05, 3],
                 ]
 
-    outputs = [gr.Audio(label="Stream Output Audio / 流式输出", streaming=True, format='mp3'),
-               gr.Audio(label="Full Output Audio / 完整输出", streaming=False, format='wav')]
+    outputs = [gr.Audio(label="ストリーミング出力", streaming=True, format='mp3'),
+               gr.Audio(label="完全出力", streaming=False, format='wav')]
 
     gr.Interface(fn=voice_conversion,
                  description=description,
                  inputs=inputs,
                  outputs=outputs,
-                 title="Seed Voice Conversion",
+                 title="Seed-VC 歌声変換",
                  examples=examples,
                  cache_examples=False,
                  ).launch(share=args.share,)
