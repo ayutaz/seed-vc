@@ -45,13 +45,65 @@ python inference_v2.py --source <source.wav> --target <reference.wav> --output <
 
 ### ファインチューニング
 
-```bash
-# V1（シングルGPU）
-python train.py --config configs/presets/config_dit_mel_seed_uvit_whisper_small_wavenet.yml \
-  --dataset-dir <audio_dir> --run-name <name> --batch-size 2 --max-steps 1000
+#### V1ファインチューニング（CFMベース）
 
-# V2（マルチGPU）
-accelerate launch train_v2.py --dataset-dir <audio_dir> --run-name <name> --train-cfm
+**データ準備**:
+- フォーマット: .wav, .mp3, .flac, .ogg, .m4a, .opus
+- 長さ: 1〜30秒/ファイル
+- データ量: 最小10〜20分、推奨30〜60分
+- 品質: クリーンな録音（ノイズ最小化）
+
+**学習コマンド**:
+```bash
+# 音声変換用（22kHz）
+uv run python train.py \
+  --config configs/presets/config_dit_mel_seed_uvit_whisper_small_wavenet.yml \
+  --dataset-dir <audio_dir> \
+  --run-name <name> \
+  --batch-size 2 \
+  --max-steps 5000 \
+  --save-every 500 \
+  --num-workers 0
+
+# 歌声変換用（44kHz、F0対応）
+uv run python train.py \
+  --config configs/presets/config_dit_mel_seed_uvit_whisper_base_f0_44k.yml \
+  --dataset-dir <audio_dir> \
+  --run-name <name> \
+  --batch-size 2 \
+  --max-steps 5000 \
+  --save-every 500 \
+  --num-workers 0
+```
+
+**ファインチューニング済みモデルで推論**:
+```bash
+# 歌声変換
+uv run python app_svc.py \
+  --checkpoint ./runs/<name>/ft_model.pth \
+  --config configs/presets/config_dit_mel_seed_uvit_whisper_base_f0_44k.yml \
+  --fp16 True
+```
+
+**学習対象コンポーネント**:
+| コンポーネント | 学習 | 説明 |
+|--------------|------|------|
+| CFM | ✅ | メルスペクトログラム生成 |
+| Length Regulator | ✅ | トークン→メル対応 |
+| CAMPPlus | ❌ | スタイルエンコーダー（固定） |
+| Vocoder | ❌ | BigVGAN/HiFiGAN（固定） |
+| Whisper | ❌ | コンテンツ抽出（固定） |
+
+#### V2ファインチューニング（マルチGPU）
+
+```bash
+accelerate launch train_v2.py \
+  --dataset-dir <audio_dir> \
+  --run-name <name> \
+  --train-cfm \
+  --batch-size 4 \
+  --max-steps 5000 \
+  --num-workers 0
 ```
 
 ### 評価
