@@ -9,7 +9,7 @@ Seed-VCは、ゼロショット音声変換（Voice Conversion）および歌声
 **主な機能**:
 - ゼロショット音声変換（V1/V2モデル）
 - リアルタイム音声変換（遅延約300ms）
-- 歌声変換（44kHz）
+- 歌声変換（V1: 44kHz、V2: 44kHz F0条件付け）
 - 少量データでのファインチューニング
 
 ## コマンド
@@ -26,11 +26,18 @@ python app_vc.py --fp16 True
 # V2音声変換UI
 python app_vc_v2.py --compile
 
-# 歌声変換UI
+# V1歌声変換UI
 python app_svc.py --fp16 True
 
 # リアルタイムGUI
 python real-time-gui.py
+```
+
+### テスト実行
+
+```bash
+# V2 SVCテスト
+uv run pytest tests/test_v2_svc.py -v
 ```
 
 ### コマンドライン推論
@@ -77,17 +84,33 @@ python eval.py --source <src_dir> --target <ref_dir> --output <out_dir> --max-sa
          → BigVGAN → 出力音声
 ```
 
+### V2 SVCパイプライン（歌声変換）
+
+```
+入力歌声 → ASTRAL量子化（話者分離コンテンツ）
+         → F0抽出（RMVPE）→ F0調整（自動/ピッチシフト）
+         → CFMパス（音色変換 + F0条件付け）
+         → BigVGAN (44kHz) → 出力歌声
+```
+
 ### ディレクトリ構造
 
 - `modules/` - コアMLモジュール
   - `diffusion_transformer.py` - DiT（U-ViT）モデル
   - `flow_matching.py` - CFM訓練ロジック
-  - `v2/` - V2モデルコンポーネント（AR、CFM、DiT）
+  - `rmvpe.py` - F0抽出器（RMVPE）
+  - `v2/` - V2モデルコンポーネント
+    - `vc_wrapper.py` - V2音声変換ラッパー（SVC対応）
+    - `length_regulator.py` - 長さ調整（F0条件付けサポート）
+    - `ar.py`, `cfm.py`, `dit_wrapper.py` - AR、CFM、DiTモジュール
   - `astral_quantization/` - ASTRAL量子化（話者分離）
   - `bigvgan/`, `hifigan/` - Vocoder実装
   - `campplus/` - スピーカーエンコーダー
 - `configs/` - YAML設定ファイル
   - `presets/` - 各モデルのプリセット設定
+  - `v2/` - V2モデル設定（vc_wrapper.yaml、vc_wrapper_svc.yaml）
+- `tests/` - テストコード
+  - `test_v2_svc.py` - V2 SVCテスト
 - `data/ft_dataset.py` - ファインチューニングデータセット
 - `baselines/` - ベースライン実装（OpenVoice、CosyVoice）
 
@@ -97,8 +120,9 @@ python eval.py --source <src_dir> --target <ref_dir> --output <out_dir> --max-sa
 |--------|------|------|------------|
 | seed-uvit-tat-xlsr-tiny | リアルタイムVC | 22050 | 25M |
 | seed-uvit-whisper-small | オフラインVC | 22050 | 98M |
-| seed-uvit-whisper-base | 歌声変換 | 44100 | 200M |
+| seed-uvit-whisper-base | V1歌声変換 | 44100 | 200M |
 | hubert-bsqvae (V2) | VC+アクセント | 22050 | 157M |
+| hubert-bsqvae-svc (V2) | 歌声変換+F0 | 44100 | 157M |
 
 モデルは初回実行時にHugging Faceから自動ダウンロードされます。
 

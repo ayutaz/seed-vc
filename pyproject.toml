@@ -20,6 +20,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "scipy>=1.15.3",
     "sounddevice>=0.5.3",
+    "speechbrain>=1.0.3",
     "torch>=2.6.0",
     "torchaudio>=2.6.0",
     "torchvision>=0.21.0",
@@ -35,3 +36,8 @@ explicit = true
 torch = { index = "pytorch-cu124" }
 torchvision = { index = "pytorch-cu124" }
 torchaudio = { index = "pytorch-cu124" }
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]

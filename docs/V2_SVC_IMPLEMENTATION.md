@@ -1,5 +1,12 @@
 # V2モデル歌声変換（SVC）対応 実装ガイド
 
+> **ステータス**: ✅ 基本実装完了（2025年1月）
+>
+> 以下の機能が実装済みです：
+> - `configs/v2/vc_wrapper_svc.yaml` - SVC用設定ファイル
+> - `modules/v2/vc_wrapper.py` - F0抽出・調整・SVC推論メソッド
+> - `tests/test_v2_svc.py` - ユニットテスト（12件パス）
+
 このドキュメントでは、Seed-VC V2モデルを歌声変換（Singing Voice Conversion）に対応させるための実装手順を説明します。
 
 ## 目次
@@ -77,7 +84,7 @@ similarity_cfg_rate = 0.7       # 声質類似度制御
 
 ## 実装手順
 
-### Phase 1: 設定ファイル作成
+### Phase 1: 設定ファイル作成 ✅ 完了
 
 **ファイル**: `configs/v2/vc_wrapper_svc.yaml`
 
@@ -154,9 +161,16 @@ vocoder:
   use_cuda_kernel: false
 ```
 
-### Phase 2: vc_wrapper.pyの修正
+### Phase 2: vc_wrapper.pyの修正 ✅ 完了
 
 **ファイル**: `modules/v2/vc_wrapper.py`
+
+実装済みメソッド:
+- `_init_f0_extractor()` - RMVPE初期化
+- `extract_f0()` - F0抽出
+- `adjust_f0()` - F0自動調整・ピッチシフト
+- `forward_cfm()` - f0パラメータ追加
+- `convert_singing_voice()` - SVC推論メソッド
 
 #### 2.1 RMVPE F0抽出器の初期化追加
 
@@ -332,9 +346,11 @@ def convert_singing_voice(
     # ... CFM推論、ボコーダー ...
 ```
 
-### Phase 3: train_v2.pyの修正
+### Phase 3: train_v2.pyの修正 ⏳ 未実装
 
 **ファイル**: `train_v2.py`
+
+> **注**: 訓練コードの修正は今後の課題です。現在は推論のみ対応しています。
 
 #### 3.1 F0抽出器の初期化
 
@@ -393,9 +409,11 @@ def _process_batch(self, epoch, i, batch):
     # ... 残りは既存コードと同じ ...
 ```
 
-### Phase 4: Gradio UIの作成
+### Phase 4: Gradio UIの作成 ⏳ 未実装
 
 **ファイル**: `app_svc_v2.py`
+
+> **注**: Gradio UIは今後の課題です。現在はPythonコードから直接`convert_singing_voice()`を呼び出してください。
 
 ```python
 import os
@@ -606,14 +624,52 @@ python app_svc_v2.py --checkpoint ./runs/svc_v2_cfm/CFM_*.pth
 
 ## 修正ファイル一覧
 
-| ファイル | 変更内容 | 優先度 |
+| ファイル | 変更内容 | ステータス |
 |---------|---------|--------|
-| `configs/v2/vc_wrapper_svc.yaml` | 新規作成：44kHz、F0条件付け設定 | 必須 |
-| `modules/v2/vc_wrapper.py` | RMVPE統合、F0抽出・調整メソッド追加 | 必須 |
-| `train_v2.py` | F0抽出・訓練ループ修正 | 必須 |
-| `app_svc_v2.py` | 新規作成：SVC用Gradio UI | 任意 |
+| `configs/v2/vc_wrapper_svc.yaml` | 新規作成：44kHz、F0条件付け設定 | ✅ 完了 |
+| `modules/v2/vc_wrapper.py` | RMVPE統合、F0抽出・調整メソッド追加 | ✅ 完了 |
+| `tests/test_v2_svc.py` | 新規作成：V2 SVCユニットテスト | ✅ 完了 |
+| `train_v2.py` | F0抽出・訓練ループ修正 | ⏳ 未実装 |
+| `app_svc_v2.py` | 新規作成：SVC用Gradio UI | ⏳ 未実装 |
 
 **注**: `modules/v2/length_regulator.py`にはすでにF0条件付け機能が実装されています（`f0_condition`パラメータ）。設定ファイルで`f0_condition: true`を指定するだけで有効化されます。
+
+## クイックスタート（推論）
+
+```python
+import torch
+from hydra.utils import instantiate
+from omegaconf import DictConfig
+import yaml
+
+# 設定読み込み
+cfg = DictConfig(yaml.safe_load(open("configs/v2/vc_wrapper_svc.yaml")))
+wrapper = instantiate(cfg)
+
+# チェックポイント読み込み
+wrapper.load_checkpoints()
+
+# デバイス設定
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+wrapper.to(device)
+wrapper.eval()
+
+# SVC推論
+result = wrapper.convert_singing_voice(
+    source_audio_path="source_song.wav",
+    target_audio_path="reference_voice.wav",
+    diffusion_steps=30,
+    auto_f0_adjust=True,
+    pitch_shift=0,  # 半音単位
+    device=device,
+)
+```
+
+## テスト実行
+
+```bash
+uv run pytest tests/test_v2_svc.py -v
+```
 
 ---
 

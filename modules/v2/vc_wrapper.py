@@ -4,6 +4,7 @@ import torchaudio
 import numpy as np
 from pydub import AudioSegment
 from hf_utils import load_custom_model_from_hf
+from typing import Optional
 
 DEFAULT_REPO_ID = "Plachta/Seed-VC"
 DEFAULT_CFM_CHECKPOINT = "v2/cfm_small.pth"
@@ -30,6 +31,7 @@ class VoiceConversionWrapper(torch.nn.Module):
             ar: torch.nn.Module,
             style_encoder: torch.nn.Module,
             vocoder: torch.nn.Module,
+            f0_condition: bool = False,
             ):
         super(VoiceConversionWrapper, self).__init__()
         self.sr = sr
@@ -52,10 +54,85 @@ class VoiceConversionWrapper(torch.nn.Module):
         self.ar_max_content_len = 1500  # in num of narrow tokens
         self.compile_len = 87 * self.dit_max_context_len
 
-    def forward_cfm(self, content_indices_wide, content_lens, mels, mel_lens, style_vectors):
+        # F0 conditioning for singing voice conversion
+        self.f0_condition = f0_condition
+        self.rmvpe = None
+        if f0_condition:
+            self._init_f0_extractor()
+
+    def _init_f0_extractor(self):
+        """Initialize RMVPE F0 extractor for singing voice conversion."""
+        from modules.rmvpe import RMVPE
+        rmvpe_path = load_custom_model_from_hf(
+            "lj1995/VoiceConversionWebUI", "rmvpe.pt", None
+        )
+        self.rmvpe = RMVPE(rmvpe_path, is_half=False, device="cpu")
+
+    def extract_f0(self, audio_16k: np.ndarray) -> torch.Tensor:
+        """
+        Extract F0 from 16kHz audio using RMVPE.
+
+        Args:
+            audio_16k: Audio signal at 16kHz sampling rate (numpy array)
+
+        Returns:
+            F0 tensor of shape (T,)
+        """
+        if self.rmvpe is None:
+            raise RuntimeError("F0 extractor not initialized. Set f0_condition=True.")
+        f0 = self.rmvpe.infer_from_audio(audio_16k, thred=0.03)
+        return torch.from_numpy(f0).float()
+
+    def adjust_f0(
+        self,
+        f0_source: torch.Tensor,
+        f0_target: torch.Tensor,
+        auto_adjust: bool = True,
+        pitch_shift: int = 0
+    ) -> torch.Tensor:
+        """
+        Adjust source F0 to match target speaker's pitch range.
+
+        Args:
+            f0_source: Source F0 tensor
+            f0_target: Target reference F0 tensor
+            auto_adjust: Whether to auto-adjust pitch range to match target
+            pitch_shift: Additional pitch shift in semitones
+
+        Returns:
+            Adjusted F0 tensor
+        """
+        adjusted = f0_source.clone()
+
+        if auto_adjust:
+            # Get voiced frames (F0 > 1 Hz)
+            voiced_src = f0_source[f0_source > 1]
+            voiced_tgt = f0_target[f0_target > 1]
+
+            if len(voiced_src) > 0 and len(voiced_tgt) > 0:
+                # Compute median log F0 for both
+                median_src = torch.median(torch.log(voiced_src + 1e-5))
+                median_tgt = torch.median(torch.log(voiced_tgt + 1e-5))
+
+                # Shift source F0 in log domain
+                log_f0 = torch.log(f0_source + 1e-5)
+                voiced_mask = f0_source > 1
+                log_f0[voiced_mask] = log_f0[voiced_mask] - median_src + median_tgt
+                adjusted = torch.exp(log_f0)
+                # Restore unvoiced frames
+                adjusted[~voiced_mask] = 0
+
+        if pitch_shift != 0:
+            # Shift by semitones (pitch_shift / 12 octaves)
+            voiced_mask = adjusted > 1
+            adjusted[voiced_mask] = adjusted[voiced_mask] * (2 ** (pitch_shift / 12))
+
+        return adjusted
+
+    def forward_cfm(self, content_indices_wide, content_lens, mels, mel_lens, style_vectors, f0=None):
         device = content_indices_wide.device
         B = content_indices_wide.size(0)
-        cond, _ = self.cfm_length_regulator(content_indices_wide, ylens=mel_lens)
+        cond, _ = self.cfm_length_regulator(content_indices_wide, ylens=mel_lens, f0=f0)
 
         # randomly set a length as prompt
         prompt_len_max = mel_lens - 1
@@ -657,8 +734,108 @@ class VoiceConversionWrapper(torch.nn.Module):
                     vc_wave, processed_frames, vc_mel, overlap_wave_len,
                     generated_wave_chunks, previous_chunk, is_last_chunk, stream_output
                 )
-                
+
                 if stream_output and mp3_bytes is not None:
                     yield mp3_bytes, full_audio
                 if should_break:
                     break
+
+    @torch.no_grad()
+    @torch.inference_mode()
+    def convert_singing_voice(
+            self,
+            source_audio_path: str,
+            target_audio_path: str,
+            diffusion_steps: int = 30,
+            length_adjust: float = 1.0,
+            inference_cfg_rate: float = 0.5,
+            auto_f0_adjust: bool = True,
+            pitch_shift: int = 0,
+            device: torch.device = torch.device("cpu"),
+            dtype: torch.dtype = torch.float32,
+    ):
+        """
+        Convert singing voice with F0 conditioning for better pitch preservation.
+
+        Args:
+            source_audio_path: Path to source singing audio file
+            target_audio_path: Path to target reference audio file
+            diffusion_steps: Number of diffusion steps (default: 30)
+            length_adjust: Length adjustment factor (default: 1.0)
+            inference_cfg_rate: CFG rate for inference (default: 0.5)
+            auto_f0_adjust: Whether to auto-adjust F0 to match target pitch range (default: True)
+            pitch_shift: Additional pitch shift in semitones (default: 0)
+            device: Device to use (default: cpu)
+            dtype: Data type to use (default: float32)
+
+        Returns:
+            Numpy array containing the converted audio waveform
+        """
+        if not self.f0_condition:
+            raise RuntimeError(
+                "F0 conditioning is not enabled. Use convert_timbre() or convert_voice() instead, "
+                "or initialize the model with f0_condition=True."
+            )
+
+        # Load audio
+        source_wave = librosa.load(source_audio_path, sr=self.sr)[0]
+        target_wave = librosa.load(target_audio_path, sr=self.sr)[0]
+        source_wave_tensor = torch.tensor(source_wave).unsqueeze(0).to(device)
+        target_wave_tensor = torch.tensor(target_wave).unsqueeze(0).to(device)
+
+        # Resample to 16kHz for feature extraction
+        source_wave_16k = librosa.resample(source_wave, orig_sr=self.sr, target_sr=16000)
+        target_wave_16k = librosa.resample(target_wave, orig_sr=self.sr, target_sr=16000)
+        source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
+        target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
+
+        # Compute mel spectrograms
+        source_mel = self.mel_fn(source_wave_tensor)
+        target_mel = self.mel_fn(target_wave_tensor)
+        source_mel_len = source_mel.size(2)
+        target_mel_len = target_mel.size(2)
+
+        # Extract F0
+        self.rmvpe.device = device
+        self.rmvpe.mel_extractor = self.rmvpe.mel_extractor.to(device)
+        self.rmvpe.model = self.rmvpe.model.to(device)
+
+        f0_source = self.extract_f0(source_wave_16k)
+        f0_target = self.extract_f0(target_wave_16k)
+
+        # Adjust F0
+        f0_adjusted = self.adjust_f0(f0_source, f0_target, auto_adjust=auto_f0_adjust, pitch_shift=pitch_shift)
+        f0_adjusted = f0_adjusted.unsqueeze(0).to(device)  # (1, T)
+
+        with torch.autocast(device_type=device.type, dtype=dtype):
+            # Compute content features
+            _, source_content_indices, _ = self.content_extractor_wide(source_wave_16k_tensor, [source_wave_16k.size])
+            _, target_content_indices, _ = self.content_extractor_wide(target_wave_16k_tensor, [target_wave_16k.size])
+
+            # Compute style features
+            target_style = self.compute_style(target_wave_16k_tensor)
+
+            # Length regulation with F0
+            cond, _ = self.cfm_length_regulator(
+                source_content_indices,
+                ylens=torch.LongTensor([source_mel_len]).to(device),
+                f0=f0_adjusted
+            )
+            prompt_condition, _ = self.cfm_length_regulator(
+                target_content_indices,
+                ylens=torch.LongTensor([target_mel_len]).to(device)
+            )
+
+            cat_condition = torch.cat([prompt_condition, cond], dim=1)
+
+            # Generate mel spectrogram
+            vc_mel = self.cfm.inference(
+                cat_condition,
+                torch.LongTensor([cat_condition.size(1)]).to(device),
+                target_mel, target_style, diffusion_steps,
+                inference_cfg_rate=inference_cfg_rate,
+            )
+
+        vc_mel = vc_mel[:, :, target_mel_len:]
+        vc_wave = self.vocoder(vc_mel.float()).squeeze()[None]
+        return vc_wave.cpu().numpy()
