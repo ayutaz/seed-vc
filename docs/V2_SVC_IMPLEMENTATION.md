@@ -1,11 +1,17 @@
 # V2モデル歌声変換（SVC）対応 実装ガイド
 
-> **ステータス**: ✅ 基本実装完了（2025年1月）
+> **ステータス**: 推論コード実装完了、訓練コード・UI未実装（2026年2月現在）
 >
-> 以下の機能が実装済みです：
-> - `configs/v2/vc_wrapper_svc.yaml` - SVC用設定ファイル
+> **完了**:
+> - `configs/v2/vc_wrapper_svc.yaml` - SVC用設定ファイル（44kHz, F0条件付け）
 > - `modules/v2/vc_wrapper.py` - F0抽出・調整・SVC推論メソッド
-> - `tests/test_v2_svc.py` - ユニットテスト（12件パス）
+> - `modules/v2/length_regulator.py` - F0条件付けLength Regulator
+> - `tests/test_v2_svc.py` - ユニットテスト（12件）
+>
+> **未実装**:
+> - `train_v2.py` - F0対応の訓練ループ
+> - `app_svc_v2.py` - Gradio Web UI
+> - SVC用事前学習済みチェックポイント（F0条件付き訓練が必要）
 
 このドキュメントでは、Seed-VC V2モデルを歌声変換（Singing Voice Conversion）に対応させるための実装手順を説明します。
 
@@ -31,15 +37,14 @@
 
 **効果**: ソース話者の特徴がより完全に除去され、クロス言語変換でのなまりが軽減されます。
 
-### 2. デュアルCFG（Classifier-Free Guidance）
+### 2. CFG（Classifier-Free Guidance）
 
 ```python
 # 推論時のパラメータ
-intelligibility_cfg_rate = 0.7  # 発音の明瞭さ制御
-similarity_cfg_rate = 0.7       # 声質類似度制御
+inference_cfg_rate = 0.5  # CFGレート（0.0〜1.0）
 ```
 
-**効果**: 歌詞の聞き取りやすさと声質を独立して調整可能です。
+**効果**: CFGレートにより変換品質を調整可能です。
 
 ### 3. ARパス（AutoRegressive）
 
@@ -142,7 +147,7 @@ cfm_length_regulator:
   codebook_size: 2048
   sampling_ratios: [ 1, 1, 1, 1 ]
   f0_condition: true          # false→true
-  n_f0_bins: 256              # 追加
+  n_f0_bins: 512              # 追加
 
 ar_length_regulator:
   _target_: modules.v2.length_regulator.InterpolateRegulator
@@ -151,7 +156,7 @@ ar_length_regulator:
   codebook_size: 32
   sampling_ratios: [ ]
   f0_condition: true          # false→true
-  n_f0_bins: 256              # 追加
+  n_f0_bins: 512              # 追加
 
 # AR, style_encoder, content_extractorは既存と同じ
 
@@ -159,6 +164,25 @@ vocoder:
   _target_: modules.bigvgan.bigvgan.BigVGAN.from_pretrained
   pretrained_model_name_or_path: "nvidia/bigvgan_v2_44khz_128band_512x"
   use_cuda_kernel: false
+```
+
+### 重要な注意事項: 事前学習済みチェックポイント
+
+> **⚠ 現在の制約**: デフォルトの事前学習済みチェックポイント（`v2/cfm_small.pth`）は `f0_condition=false` で訓練されています。SVC用設定（`vc_wrapper_svc.yaml`）では `f0_condition=true` を指定していますが、チェックポイントにはF0エンベディング層の重みが含まれていません。`strict=False` でロードするためエラーにはなりませんが、**F0条件付けは実質的に無効（ランダム初期化のまま）** です。
+>
+> V2 SVCを実用的に使用するには、F0条件付きでCFMモデルを再訓練する必要があります。
+
+#### F0伝搬のアーキテクチャ
+
+F0情報はパイプライン内で以下のように流れます：
+
+1. **F0抽出**: `extract_f0()` がRMVPEを使用して16kHz音声からフレーム単位のF0を抽出
+2. **F0調整**: `adjust_f0()` がソース/ターゲット間のピッチレンジを調整
+3. **Length Regulator**: `InterpolateRegulator` でF0がエンベディングに変換され、コンテンツ特徴に加算される
+4. **CFM/DiT**: Length Regulatorの出力（F0が統合済み）を受け取る。DiTに直接F0を渡す必要はない（設計意図）
+
+```
+F0 → F0 Embedding (n_f0_bins=512) → コンテンツ特徴に加算 → CFM入力
 ```
 
 ### Phase 2: vc_wrapper.pyの修正 ✅ 完了
@@ -198,29 +222,20 @@ class VoiceConversionWrapper(torch.nn.Module):
 #### 2.2 F0抽出メソッドの追加
 
 ```python
-def extract_f0(self, audio_16k: torch.Tensor, device: torch.device) -> torch.Tensor:
+def extract_f0(self, audio_16k: np.ndarray) -> torch.Tensor:
     """
     RMVPEを使用してF0を抽出
 
     Args:
-        audio_16k: 16kHzにリサンプリングされた音声 (B, T)
-        device: 計算デバイス
+        audio_16k: 16kHzにリサンプリングされた音声（numpy配列）
 
     Returns:
-        F0: (B, T') - フレーム単位のF0値
+        F0: (T,) - フレーム単位のF0値（torch.Tensor）
     """
-    f0_list = []
-    for b in range(audio_16k.size(0)):
-        f0 = self.rmvpe.infer_from_audio(
-            audio_16k[b].cpu().numpy(),
-            thred=0.03
-        )
-        f0_list.append(torch.from_numpy(f0).float())
-
-    f0 = torch.nn.utils.rnn.pad_sequence(
-        f0_list, batch_first=True
-    ).to(device)
-    return f0
+    if self.rmvpe is None:
+        raise RuntimeError("F0 extractor not initialized. Set f0_condition=True.")
+    f0 = self.rmvpe.infer_from_audio(audio_16k, thred=0.03)
+    return torch.from_numpy(f0).float()
 ```
 
 #### 2.3 F0調整メソッドの追加
@@ -299,12 +314,11 @@ def convert_singing_voice(
         target_audio_path: str,
         diffusion_steps: int = 30,
         length_adjust: float = 1.0,
-        intelligibility_cfg_rate: float = 0.7,
-        similarity_cfg_rate: float = 0.7,
+        inference_cfg_rate: float = 0.5,
         auto_f0_adjust: bool = True,
         pitch_shift: int = 0,
-        device: torch.device = torch.device("cuda"),
-        dtype: torch.dtype = torch.float16,
+        device: torch.device = torch.device("cpu"),
+        dtype: torch.dtype = torch.float32,
 ):
     """
     歌声変換のメインメソッド
@@ -320,10 +334,10 @@ def convert_singing_voice(
     source_wave_16k_tensor = torch.tensor(source_wave_16k).unsqueeze(0).to(device)
     target_wave_16k_tensor = torch.tensor(target_wave_16k).unsqueeze(0).to(device)
 
-    # F0抽出
+    # F0抽出（numpy配列を渡す）
     if self.f0_condition:
-        f0_source = self.extract_f0(source_wave_16k_tensor, device)
-        f0_target = self.extract_f0(target_wave_16k_tensor, device)
+        f0_source = self.extract_f0(source_wave_16k)
+        f0_target = self.extract_f0(target_wave_16k)
 
         # F0調整
         f0_adjusted = self.adjust_f0(
@@ -467,7 +481,7 @@ def load_models(args):
 def convert_singing_voice(
     source, target,
     diffusion_steps, length_adjust,
-    intelligibility_cfg, similarity_cfg,
+    inference_cfg_rate,
     auto_f0_adjust, pitch_shift
 ):
     # 変換処理
@@ -476,8 +490,7 @@ def convert_singing_voice(
         target_audio_path=target,
         diffusion_steps=diffusion_steps,
         length_adjust=length_adjust,
-        intelligibility_cfg_rate=intelligibility_cfg,
-        similarity_cfg_rate=similarity_cfg,
+        inference_cfg_rate=inference_cfg_rate,
         auto_f0_adjust=auto_f0_adjust,
         pitch_shift=pitch_shift,
         device=device,
@@ -494,7 +507,7 @@ def main(args):
 
     **特徴**:
     - ASTRAL量子化による高精度な話者分離
-    - デュアルCFGによる明瞭さ/類似度の独立制御
+    - CFGレートによる変換品質の調整
     - F0条件付けによる正確なピッチ再現
     """
 
@@ -503,8 +516,7 @@ def main(args):
         gr.Audio(type="filepath", label="Reference Audio (参照音声)"),
         gr.Slider(1, 100, value=30, step=1, label="Diffusion Steps"),
         gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="Length Adjust"),
-        gr.Slider(0.0, 1.0, value=0.7, step=0.1, label="Intelligibility CFG"),
-        gr.Slider(0.0, 1.0, value=0.7, step=0.1, label="Similarity CFG"),
+        gr.Slider(0.0, 1.0, value=0.5, step=0.1, label="Inference CFG Rate"),
         gr.Checkbox(label="Auto F0 Adjust", value=True),
         gr.Slider(-24, 24, value=0, step=1, label="Pitch Shift (semitones)"),
     ]
@@ -636,6 +648,8 @@ python app_svc_v2.py --checkpoint ./runs/svc_v2_cfm/CFM_*.pth
 
 ## クイックスタート（推論）
 
+> **⚠ 注意**: デフォルトのチェックポイントはF0条件付けなしで訓練されています。以下のコードは構造的には動作しますが、F0条件付けの効果を得るにはF0対応のチェックポイントで再訓練が必要です。現時点ではSVC専用の事前学習済みチェックポイントは公開されていません。
+
 ```python
 import torch
 from hydra.utils import instantiate
@@ -659,6 +673,7 @@ result = wrapper.convert_singing_voice(
     source_audio_path="source_song.wav",
     target_audio_path="reference_voice.wav",
     diffusion_steps=30,
+    inference_cfg_rate=0.5,
     auto_f0_adjust=True,
     pitch_shift=0,  # 半音単位
     device=device,
@@ -679,9 +694,9 @@ V2 SVC訓練後、以下の改善が期待されます：
 
 1. **声質変換精度向上**: ASTRAL話者分離により元話者の特徴がより除去される
 2. **クロス言語品質向上**: 英語→日本語でのなまりが軽減
-3. **ピッチ精度向上**: F0条件付けによる正確なピッチ再現
+3. **ピッチ精度向上**: F0条件付けによる正確なピッチ再現（F0対応チェックポイントで訓練後）
 4. **表現力向上**: ARパスによるアクセント・感情の詳細な再現
-5. **柔軟な調整**: デュアルCFGによる明瞭さ/類似度の独立制御
+5. **柔軟な調整**: CFGレートによる変換品質の調整
 
 ---
 

@@ -29,6 +29,8 @@ python app_vc_v2.py --compile
 # V1歌声変換UI
 python app_svc.py --fp16 True
 
+# V2歌声変換UI（未実装 - app_svc_v2.pyは今後の課題）
+
 # リアルタイムGUI
 python real-time-gui.py
 ```
@@ -122,9 +124,11 @@ python eval.py --source <src_dir> --target <ref_dir> --output <out_dir> --max-sa
 | seed-uvit-whisper-small | オフラインVC | 22050 | 98M |
 | seed-uvit-whisper-base | V1歌声変換 | 44100 | 200M |
 | hubert-bsqvae (V2) | VC+アクセント | 22050 | 157M |
-| hubert-bsqvae-svc (V2) | 歌声変換+F0 | 44100 | 157M |
+| hubert-bsqvae-svc (V2) | 歌声変換+F0 | 44100 | 157M | ※要訓練（後述） |
 
 モデルは初回実行時にHugging Faceから自動ダウンロードされます。
+
+> **V2 SVC注意**: `hubert-bsqvae-svc`のSVC専用チェックポイントは未公開です。デフォルトの`cfm_small.pth`は`f0_condition=false`で訓練されており、F0条件付けは実質無効です。V2 SVCを実用化するにはF0条件付きでの再訓練が必要です。推論コード（`vc_wrapper.py`）のみ実装済みで、訓練コード・UIは未実装です。
 
 ## 開発上の注意
 
@@ -140,6 +144,7 @@ python eval.py --source <src_dir> --target <ref_dir> --output <out_dir> --max-sa
 主要な設定パラメータ（YAML形式）:
 
 ```yaml
+# V1設定例
 preprocess_params:
   sr: 22050/44100  # サンプリングレート
 
@@ -147,6 +152,11 @@ DiT:
   hidden_dim: 384/512/768  # モデル次元
   depth: 9/13/17           # レイヤー数
   f0_condition: true       # 歌声変換時に有効化
+
+# V2 SVC設定例（configs/v2/vc_wrapper_svc.yaml）
+cfm_length_regulator:
+  f0_condition: true       # F0条件付け有効化
+  n_f0_bins: 512           # F0量子化ビン数
 ```
 
 ## インストール
