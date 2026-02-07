@@ -127,6 +127,11 @@ class Trainer:
                 for p in self.model.ar_length_regulator.parameters():
                     p.requires_grad = True
 
+        # Check if F0 conditioning is enabled
+        self.f0_condition = getattr(self.model, 'f0_condition', False)
+        if self.f0_condition:
+            print("F0 conditioning enabled for training")
+
 
     def _init_optimizers(self):
         """Initialize optimizers and schedulers"""
@@ -217,6 +222,18 @@ class Trainer:
                 self._save_checkpoint(epoch)
                 exit()
 
+    @torch.no_grad()
+    def _extract_f0_batch(self, waves_16k, wave_lengths_16k):
+        """Extract F0 from a batch of 16kHz audio using the model's RMVPE extractor."""
+        model = self.accelerator.unwrap_model(self.model)
+        f0_list = []
+        for b in range(waves_16k.size(0)):
+            audio_np = waves_16k[b, :wave_lengths_16k[b]].cpu().numpy()
+            f0 = model.extract_f0(audio_np)
+            f0_list.append(f0)
+        f0 = torch.nn.utils.rnn.pad_sequence(f0_list, batch_first=True).to(self.device)
+        return f0
+
     def _process_batch(self, epoch, i, batch):
         """Process a single batch"""
         # Move batch to device
@@ -224,6 +241,11 @@ class Trainer:
         # Resample to 16kHz for ASR models
         waves_16k = torchaudio.functional.resample(waves, self.sr, 16000)
         wave_lengths_16k = (wave_lens.float() * 16000 / self.sr).long()
+
+        # F0 extraction for SVC training
+        f0 = None
+        if self.f0_condition:
+            f0 = self._extract_f0_batch(waves_16k, wave_lengths_16k)
 
         # Forward pass and loss calculation
         with self.accelerator.autocast():
@@ -234,6 +256,7 @@ class Trainer:
                 mel_lens.to(self.device),
                 forward_ar=self.train_ar,
                 forward_cfm=self.train_cfm,
+                f0=f0,
             )
 
             loss = loss_ar + loss_cfm

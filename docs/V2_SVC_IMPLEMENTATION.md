@@ -1,6 +1,6 @@
 # V2モデル歌声変換（SVC）対応 実装ガイド
 
-> **ステータス**: 推論コード実装完了、訓練コード・UI未実装（2026年2月現在）
+> **ステータス**: 推論コード・訓練コード実装完了、UI未実装（2026年2月現在）
 >
 > **完了**:
 > - `configs/v2/vc_wrapper_svc.yaml` - SVC用設定ファイル（44kHz, F0条件付け）
@@ -9,7 +9,6 @@
 > - `tests/test_v2_svc.py` - ユニットテスト（12件）
 >
 > **未実装**:
-> - `train_v2.py` - F0対応の訓練ループ
 > - `app_svc_v2.py` - Gradio Web UI
 > - SVC用事前学習済みチェックポイント（F0条件付き訓練が必要）
 
@@ -360,11 +359,15 @@ def convert_singing_voice(
     # ... CFM推論、ボコーダー ...
 ```
 
-### Phase 3: train_v2.pyの修正 ⏳ 未実装
+### Phase 3: train_v2.pyの修正 ✅ 完了
 
 **ファイル**: `train_v2.py`
 
-> **注**: 訓練コードの修正は今後の課題です。現在は推論のみ対応しています。
+実装済み:
+- `_init_main_model()` - F0条件フラグの検出（`model.f0_condition`）
+- `_extract_f0_batch()` - バッチ単位のF0抽出（RMVPEを使用）
+- `_process_batch()` - F0抽出結果を`forward()`に渡す
+- `forward()` / `forward_ar()` - f0引数を受け取りLength Regulatorに渡す
 
 #### 3.1 F0抽出器の初期化
 
@@ -641,7 +644,7 @@ python app_svc_v2.py --checkpoint ./runs/svc_v2_cfm/CFM_*.pth
 | `configs/v2/vc_wrapper_svc.yaml` | 新規作成：44kHz、F0条件付け設定 | ✅ 完了 |
 | `modules/v2/vc_wrapper.py` | RMVPE統合、F0抽出・調整メソッド追加 | ✅ 完了 |
 | `tests/test_v2_svc.py` | 新規作成：V2 SVCユニットテスト | ✅ 完了 |
-| `train_v2.py` | F0抽出・訓練ループ修正 | ⏳ 未実装 |
+| `train_v2.py` | F0抽出・訓練ループ修正 | ✅ 完了 |
 | `app_svc_v2.py` | 新規作成：SVC用Gradio UI | ⏳ 未実装 |
 
 **注**: `modules/v2/length_regulator.py`にはすでにF0条件付け機能が実装されています（`f0_condition`パラメータ）。設定ファイルで`f0_condition: true`を指定するだけで有効化されます。

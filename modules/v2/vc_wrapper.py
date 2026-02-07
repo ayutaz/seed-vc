@@ -142,7 +142,7 @@ class VoiceConversionWrapper(torch.nn.Module):
         loss = self.cfm(mels, mel_lens, prompt_len, cond, style_vectors)
         return loss
 
-    def forward_ar(self, content_indices_narrow, content_indices_wide, content_lens):
+    def forward_ar(self, content_indices_narrow, content_indices_wide, content_lens, f0=None):
         device = content_indices_narrow.device
         duration_reduced_narrow_tokens = []
         duration_reduced_narrow_lens = []
@@ -155,11 +155,11 @@ class VoiceConversionWrapper(torch.nn.Module):
         duration_reduced_narrow_lens = torch.LongTensor(duration_reduced_narrow_lens).to(device)
 
         # interpolate speech token to match acoustic feature length
-        cond, _ = self.ar_length_regulator(duration_reduced_narrow_tokens)
+        cond, _ = self.ar_length_regulator(duration_reduced_narrow_tokens, f0=f0)
         loss = self.ar(cond, duration_reduced_narrow_lens, content_indices_wide, content_lens)
         return loss
 
-    def forward(self, waves_16k, mels, wave_lens_16k, mel_lens, forward_ar=False, forward_cfm=True):
+    def forward(self, waves_16k, mels, wave_lens_16k, mel_lens, forward_ar=False, forward_cfm=True, f0=None):
         """
         Forward pass for the model.
         """
@@ -169,12 +169,12 @@ class VoiceConversionWrapper(torch.nn.Module):
         if forward_ar:
             # extract narrow content features for AR model
             _, content_indices_narrow, _ = self.content_extractor_narrow(waves_16k, wave_lens_16k, ssl_model=self.content_extractor_wide.ssl_model)
-            loss_ar = self.forward_ar(content_indices_narrow.clone(), content_indices_wide.clone(), content_lens)
+            loss_ar = self.forward_ar(content_indices_narrow.clone(), content_indices_wide.clone(), content_lens, f0=f0)
         else:
             loss_ar = torch.tensor(0.0, device=waves_16k.device, dtype=waves_16k.dtype)
         if forward_cfm:
             style_vectors = self.compute_style(waves_16k, wave_lens_16k)
-            loss_cfm = self.forward_cfm(content_indices_wide, content_lens, mels, mel_lens, style_vectors)
+            loss_cfm = self.forward_cfm(content_indices_wide, content_lens, mels, mel_lens, style_vectors, f0=f0)
         else:
             loss_cfm = torch.tensor(0.0, device=waves_16k.device, dtype=waves_16k.dtype)
         return loss_ar, loss_cfm
