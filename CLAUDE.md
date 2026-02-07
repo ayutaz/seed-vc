@@ -29,7 +29,8 @@ python app_vc_v2.py --compile
 # V1歌声変換UI
 python app_svc.py --fp16 True
 
-# V2歌声変換UI（未実装 - app_svc_v2.pyは今後の課題）
+# V2歌声変換UI
+python app_svc_v2.py
 
 # リアルタイムGUI
 python real-time-gui.py

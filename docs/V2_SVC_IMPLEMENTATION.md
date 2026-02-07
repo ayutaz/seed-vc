@@ -9,7 +9,7 @@
 > | Length Regulator F0対応 (`modules/v2/length_regulator.py`) | ✅ 完了 |
 > | 訓練コード (`train_v2.py`) | ✅ 完了 |
 > | テスト (`tests/test_v2_svc.py`) | ✅ 完了 (12件) |
-> | Web UI (`app_svc_v2.py`) | ⏳ 未実装 |
+> | Web UI (`app_svc_v2.py`) | ✅ 完了 |
 > | SVC専用チェックポイント | ⏳ 未公開（F0条件付き訓練が必要） |
 
 ---
@@ -310,7 +310,7 @@ uv run pytest tests/test_v2_svc.py -v
 | `modules/rmvpe.py` | RMVPE F0抽出器 | ✅ |
 | `train_v2.py` | V2訓練スクリプト（F0対応） | ✅ |
 | `tests/test_v2_svc.py` | V2 SVCユニットテスト（12件） | ✅ |
-| `app_svc_v2.py` | V2 SVC用Web UI | ⏳ 未実装 |
+| `app_svc_v2.py` | V2 SVC用Web UI（Gradio） | ✅ |
 
 ---
 
