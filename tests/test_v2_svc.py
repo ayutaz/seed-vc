@@ -163,6 +163,34 @@ class TestLengthRegulatorF0:
         assert output.shape[1] == target_len
 
 
+    def test_length_regulator_f0_without_ylens(self):
+        """Test that length_regulator handles F0 when ylens is None (AR path)."""
+        from modules.v2.length_regulator import InterpolateRegulator
+
+        # AR-style regulator: no interpolation (sampling_ratios=[])
+        regulator = InterpolateRegulator(
+            channels=768,
+            sampling_ratios=[],
+            is_discrete=True,
+            codebook_size=32,
+            f0_condition=True,
+            n_f0_bins=512,
+        )
+
+        batch_size = 2
+        seq_len = 10
+
+        x = torch.randint(0, 32, (batch_size, seq_len))
+        f0 = torch.rand(batch_size, seq_len) * 500
+
+        # Should not crash when ylens=None and f0 is provided
+        output, olens = regulator(x, ylens=None, f0=f0)
+
+        assert output.shape[0] == batch_size
+        assert output.shape[1] == seq_len
+        assert olens is None
+
+
 class TestVCWrapperInitialization:
     """Tests for VoiceConversionWrapper initialization with f0_condition."""
 

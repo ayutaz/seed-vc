@@ -8,7 +8,7 @@
 > | 推論コード (`modules/v2/vc_wrapper.py`) | ✅ 完了 |
 > | Length Regulator F0対応 (`modules/v2/length_regulator.py`) | ✅ 完了 |
 > | 訓練コード (`train_v2.py`) | ✅ 完了 |
-> | テスト (`tests/test_v2_svc.py`) | ✅ 完了 (12件) |
+> | テスト (`tests/test_v2_svc.py`) | ✅ 完了 (13件) |
 > | Web UI (`app_svc_v2.py`) | ✅ 完了 |
 > | SVC専用チェックポイント | ⏳ 未公開（F0条件付き訓練が必要） |
 
@@ -270,7 +270,7 @@ AR_epoch_XXXXX_step_XXXXX.pth
 uv run pytest tests/test_v2_svc.py -v
 ```
 
-### テスト一覧 (12件)
+### テスト一覧 (13件)
 
 | クラス | テスト | 検証内容 |
 |--------|--------|---------|
@@ -281,6 +281,7 @@ uv run pytest tests/test_v2_svc.py -v
 | TestF0Adjustment | `test_adjust_f0_no_adjustment` | 無調整時の恒等性 |
 | TestLengthRegulatorF0 | `test_length_regulator_receives_f0` | F0パラメータの受け渡し |
 | TestLengthRegulatorF0 | `test_length_regulator_f0_none_uses_mask` | F0=None時のf0_mask使用 |
+| TestLengthRegulatorF0 | `test_length_regulator_f0_without_ylens` | AR path: ylens=None+F0ありの処理 |
 | TestVCWrapperInitialization | `test_init_with_f0_condition_true` | f0_condition=true時の初期化 |
 | TestVCWrapperInitialization | `test_init_with_f0_condition_false` | f0_condition=false時の初期化 |
 | TestConvertSingingVoice | `test_convert_singing_voice_raises_when_f0_disabled` | F0無効時のエラー |
@@ -309,7 +310,7 @@ uv run pytest tests/test_v2_svc.py -v
 | `modules/v2/length_regulator.py` | Length Regulator（F0埋め込み） | ✅ |
 | `modules/rmvpe.py` | RMVPE F0抽出器 | ✅ |
 | `train_v2.py` | V2訓練スクリプト（F0対応） | ✅ |
-| `tests/test_v2_svc.py` | V2 SVCユニットテスト（12件） | ✅ |
+| `tests/test_v2_svc.py` | V2 SVCユニットテスト（13件） | ✅ |
 | `app_svc_v2.py` | V2 SVC用Web UI（Gradio） | ✅ |
 
 ---

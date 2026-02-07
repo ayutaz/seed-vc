@@ -63,7 +63,7 @@ def convert_singing_voice(
         device=device,
         dtype=dtype,
     )
-    return (sr, result.squeeze())
+    return (sr, result.squeeze(0) if result.ndim > 1 else result)
 
 
 def main(args):

@@ -1,6 +1,7 @@
 _target_: modules.v2.vc_wrapper.VoiceConversionWrapper
 sr: 44100
 hop_size: 512
+f0_condition: true
 mel_fn:
   _target_: modules.audio.mel_spectrogram
   _partial_: true

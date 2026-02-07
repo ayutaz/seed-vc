@@ -97,7 +97,8 @@ class InterpolateRegulator(nn.Module):
                 quantized_f0 = f0_to_coarse(f0, self.n_f0_bins)
                 quantized_f0 = quantized_f0.clamp(0, self.n_f0_bins - 1).long()
                 f0_emb = self.f0_embedding(quantized_f0)
-                f0_emb = F.interpolate(f0_emb.transpose(1, 2).contiguous(), size=ylens.max(), mode='nearest')
+                target_size = ylens.max() if ylens is not None else x.size(2)
+                f0_emb = F.interpolate(f0_emb.transpose(1, 2).contiguous(), size=target_size, mode='nearest')
                 x = x + f0_emb
         out = self.model(x).transpose(1, 2).contiguous()
         out = out * mask if mask is not None else out
