@@ -16,6 +16,7 @@ dependencies = [
     "librosa>=0.11.0",
     "modelscope>=1.33.0",
     "munch>=4.0.0",
+    "packaging<25",
     "pydub>=0.25.1",
     "python-dotenv>=1.2.1",
     "scipy>=1.15.3",
@@ -24,7 +25,8 @@ dependencies = [
     "torch>=2.6.0",
     "torchaudio>=2.6.0",
     "torchvision>=0.21.0",
-    "transformers>=4.57.3",
+    "transformers<4.50",
+    "typer>=0.20.1",
 ]
 
 [[tool.uv.index]]
